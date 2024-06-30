@@ -89,6 +89,8 @@ class Listener(Component):
 
         :param db: Data layer instance.
         """
+
+        from superduperdb.base.datalayer import Event
         self.create_output_dest(db, self.uuid, self.model)
         if self.select is not None and self.active and not db.server_mode:
             if CFG.cluster.cdc.uri:
@@ -100,6 +102,24 @@ class Listener(Component):
                 )
             else:
                 db.cdc.add(self)
+
+        db.compute.queue.declare_component(self)
+        
+        ids = db.execute(self.select.select_ids)
+        ids = [id[self.select.primary_id] for id in ids]
+        events = [{'identifier': id, 'type': Event.insert} for id in ids]
+        deps = [{'type_id': 'listener', 'identifier': self.identifier}]
+        return db.compute.broadcast(events, to=deps)
+
+
+    def on_db_event(self, db, events):
+        from superduperdb.base.datalayer import Event
+
+        for type, events in Event.chunk_by_event(events).items():
+            overwrite= True if type in [Event.insert, Event.upsert] else False
+
+            ids = [event['identifier'] for event in events]
+            self.schedule_jobs(db=db, ids=ids , overwrite=overwrite)
 
     @classmethod
     def create_output_dest(cls, db: "Datalayer", uuid, model: Model):
@@ -156,6 +176,7 @@ class Listener(Component):
         db: "Datalayer",
         dependencies: t.Sequence[Job] = (),
         overwrite: bool = False,
+        ids: t.Optional[t.List] = []
     ) -> t.Sequence[t.Any]:
         """Schedule jobs for the listener.
 
@@ -183,6 +204,7 @@ class Listener(Component):
                 db=db,
                 predict_id=self.uuid,
                 select=self.select,
+                ids=ids,
                 dependencies=tuple(dependencies),
                 overwrite=overwrite,
                 **(self.predict_kwargs or {}),

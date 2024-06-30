@@ -170,6 +170,41 @@ class VectorIndex(Component):
         db.fast_vector_searchers[self.identifier].drop()
         del db.fast_vector_searchers[self.identifier]
 
+    def on_db_event(self, db, events):
+        from superduperdb.vector_search.update_tasks import delete_vectors, copy_vectors
+        from superduperdb.base.datalayer import Event
+        def _schedule_jobs(ids, type=Event.insert):
+            if type in [Event.insert, Event.upsert]:
+
+                callable =  copy_vectors
+            elif type == Event.delete:
+                callable = delete_vectors
+            else:
+                return
+            job=FunctionJob(
+                callable=callable,
+                args=[],
+                kwargs=dict(
+                    vector_index=self.identifier,
+                    ids=ids,
+                    query=self.indexing_listener.select.encode()
+                ),
+            )
+            job(db=db)
+        
+        for type, events in Event.chunk_by_event(events).items():
+            ids = [event['identifier'] for event in events]
+            _schedule_jobs(ids, type=type)
+
+    @override
+    def post_create(self, db: "Datalayer") -> None:
+        """Post-create hook.
+
+        :param db: Data layer instance.
+        """
+        db.compute.queue.declare_component(self)
+
+
     @property
     def models_keys(self) -> t.Tuple[t.List[str], t.List[ModelInputType]]:
         """Return a list of model and keys for each listener."""
