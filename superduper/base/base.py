@@ -2,7 +2,6 @@ import dataclasses as dc
 import importlib
 import inspect
 import typing as t
-from functools import lru_cache
 
 from superduper.base.constant import KEY_BLOBS, KEY_BUILDS, KEY_FILES
 from superduper.base.encoding import EncodeContext
@@ -17,7 +16,58 @@ if t.TYPE_CHECKING:
     from superduper.base.datalayer import Datalayer
 
 
-REGISTRY = {}
+RESERVED_INIT_PARAMS = frozenset(
+    {
+        "component",
+        "uuid",
+        "status",
+        "details",
+        "version",
+    }
+)
+
+
+class _UniqueRegistry:
+    def __init__(self, d):
+        self.d = d
+
+    def __contains__(self, item):
+        if '.' in item:
+            return item in self.d
+        else:
+            return item in [k.split('.')[-1] for k in self.d]
+
+    def drop(self):
+        for k in list(self.d.keys()):
+            del self.d[k]
+
+    def __getitem__(self, item):
+        if '.' in item:
+            return self.d[item]
+        else:
+            try:
+                key = next(k for k in self.d if k.split('.')[-1] == item)
+            except StopIteration:
+                raise KeyError(item)
+            return self.d[key]
+
+    def __setitem__(self, key, value):
+        matching = [x for x in self.d.keys() if x.split('.')[-1] == key.split('.')[-1]]
+        if matching and matching[0] != key:
+            raise ValueError(
+                f"Class name \"{key.split('.')[-1]}\" already exists"
+                f" as a `superduper` schema: as {matching[0]}."
+            )
+        elif matching:
+            return
+        self.d[key] = value
+
+    def __repr__(self):
+        return f'_UniqueRegistry({self.d})'
+
+
+# TODO - move this logic to `Component`, which is where the classes should be
+REGISTRY = _UniqueRegistry({})
 
 
 class BaseMeta(type):
@@ -87,20 +137,51 @@ class Base(metaclass=BaseMeta):
     """Base class for all superduper classes."""
 
     verbosity: t.ClassVar[int] = 0
-    set_post_init: t.ClassVar[t.Sequence[str]] = ()
+    primary_id: t.ClassVar[str] = 'uuid'
+    metadata_fields: t.ClassVar[t.Dict] = {'_path': str}
 
     def __init_subclass__(cls):
         full_path = f"{cls.__module__}.{cls.__name__}"
         REGISTRY[full_path] = cls
+
+        sig = inspect.signature(cls.__init__)
+        params = {name for name in sig.parameters if name != "self"}
+        params.discard("db")
+
+        bad = params & RESERVED_INIT_PARAMS
+        if bad:
+            raise TypeError(
+                f"{cls.__module__}.{cls.__name__} uses reserved __init__ "
+                f"parameter(s): {', '.join(sorted(bad))}. "
+                "Rename these fields, "
+                "so they are not part of the __init__ signature."
+            )
+
         return super().__init_subclass__()
 
     @lazy_classproperty
-    def _new_fields(cls):
+    def parameters(cls):
+        """Get parameters of the class."""
+        return {
+            k: v for k, v in cls.class_fields.items() if k not in cls.metadata_fields
+        }
+
+    @lazy_classproperty
+    def class_fields(cls):
         """Get the schema of the class."""
         from superduper.misc.schema import get_schema
 
         s = get_schema(cls)[0]
         return s
+
+    @property
+    def metadata(self):
+        """Get metadata of the component."""
+        return {k: getattr(self, k) for k in self.metadata_fields}
+
+    @property
+    def _path(self):
+        return f"{self.__class__.__module__}.{self.__class__.__name__}"
 
     def set_variables(self, uuid_swaps: t.Dict | None = None, **kwargs) -> 'Base':
         """Set free variables of self.
@@ -121,7 +202,7 @@ class Base(metaclass=BaseMeta):
         from superduper.base.datatype import INBUILT_DATATYPES
         from superduper.base.schema import Schema
 
-        named_fields = cls._new_fields
+        named_fields = cls.class_fields
         for f in named_fields:
             fields[f] = INBUILT_DATATYPES[named_fields[f]]
 
@@ -130,16 +211,14 @@ class Base(metaclass=BaseMeta):
 
     @lazy_classproperty
     def table(cls):
-        from superduper import Component
         from superduper.components.table import Table
-        from superduper.misc.importing import isreallyinstance
 
+        if cls.__name__ == 'Base':
+            return None
         return Table(
             identifier=cls.__name__,
             fields=cls.class_schema.fields,
-            path=cls.__module__ + '.' + cls.__name__,
-            primary_id='uuid',
-            is_component=isreallyinstance(cls, Component),
+            primary_id=cls.primary_id,
         )
 
     @staticmethod
@@ -223,27 +302,25 @@ class Base(metaclass=BaseMeta):
                 **{k: v for k, v in r.items() if k in signature_params},
                 db=db,
             )
-        try:
-            out = cls(**{k: v for k, v in r.items() if k != '_path'}, db=db)
-            return out
-        except TypeError as e:
-            if 'got an unexpected keyword argument' in str(e):
-                r['db'] = db
-                signature_params = inspect.signature(cls.__init__).parameters
-                init_params = {k: v for k, v in r.items() if k in signature_params}
-                post_init_params = {
-                    k: v
-                    for k, v in r.items()
-                    if k in getattr(cls, 'metadata_fields', {})
-                }
-                instance = cls(**init_params)
-                for k, v in post_init_params.items():
-                    try:
-                        setattr(instance, k, v)
-                    except AttributeError:
-                        pass  # can't set property
-                return instance
-            raise e
+        signature_params = inspect.signature(cls.__init__).parameters
+        in_signature = {k: v for k, v in r.items() if k in signature_params}
+        in_metadata = {
+            k: v for k, v in r.items() if k in getattr(cls, 'metadata_fields', {})
+        }
+        assert set(in_signature) | set(in_metadata) == set(
+            r
+        ), f'Unexpected parameters in dict not in signature or metadata fields of {cls.__name__}: {set(r) - (set(in_signature) | set(in_metadata))}'
+        if 'db' in signature_params:
+            out = cls(**in_signature, db=db)
+        else:
+            out = cls(**in_signature)
+        for k, v in r.items():
+            if k in getattr(cls, 'metadata_fields', {}):
+                try:
+                    setattr(out, k, v)
+                except AttributeError:
+                    pass  # can't set property
+        return out
 
     def postinit(self):
         """Post-initialization method."""
@@ -277,10 +354,7 @@ class Base(metaclass=BaseMeta):
         """
         from superduper.base.document import Document
 
-        if '_path' in r:
-            from superduper.misc.importing import import_object
-
-            cls = import_object(r['_path'])
+        cls = cls.get_cls_from_path(r['_path'])
 
         r = Document.decode(r, schema=cls.class_schema, db=db)
         return cls.from_dict(r, db=db)
@@ -313,6 +387,7 @@ class Base(metaclass=BaseMeta):
                             del r[k]
         if r is None:
             r = self.dict(metadata=context.metadata)
+            r['component'] = self.__class__.__name__
 
         if not context.defaults:
             for k, v in list(r.items()):
@@ -422,17 +497,11 @@ class Base(metaclass=BaseMeta):
         from superduper import Document
 
         r = asdict(self)
-        r['_path'] = self.__class__.__module__ + '.' + self.__class__.__name__
         if metadata:
-            metadata = getattr(self, 'metadata', {})
-            for k, v in metadata.items():
+            for k, v in self.metadata.items():
                 r[k] = v
         else:
-            for k in list(r.keys()):
-                if k in getattr(self, 'metadata_fields', {}):
-                    if k in r:
-                        del r[k]
-
+            r['_path'] = self._path
         return Document(r, schema=self.class_schema)
 
     @classmethod

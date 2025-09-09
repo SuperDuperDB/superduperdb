@@ -17,10 +17,7 @@ import uuid
 from types import MethodType
 
 from superduper import CFG, logging
-from superduper.base import exceptions
-from superduper.base.base import Base
-from superduper.base.constant import KEY_BLOBS, KEY_BUILDS, KEY_FILES, KEY_PATH
-from superduper.base.datatype import BaseDataType
+from superduper.base.base import REGISTRY, Base
 from superduper.base.document import Document, _unpack
 
 if t.TYPE_CHECKING:
@@ -404,7 +401,10 @@ def get(self, raw: bool = False, decode: bool = False, **kwargs):
         return
 
     if decode:
-        cls = self.db.load('Table', self.table).cls
+        try:
+            cls = REGISTRY[self.table]
+        except KeyError:
+            cls = self.db.load('Table', self.table).cls
         return cls.decode(result, db=self.db)
 
     return result
@@ -742,7 +742,7 @@ class Query(_BaseQuery):
     def copy(self):
         """Copy the query."""
         r = self.dict()
-        del r['_path']
+        del r['component']
         return parse_query(**r, db=self.db)
 
     def dict(self, *args, **kwargs):
@@ -758,6 +758,7 @@ class Query(_BaseQuery):
         return Document(
             {
                 '_path': 'superduper.base.query.parse_query',
+                'component': 'parse_query',
                 'documents': documents,
                 'query': query,
             }
@@ -799,6 +800,10 @@ class Query(_BaseQuery):
         return self + Op(op, args=(other,), kwargs={}, symbol=SYMBOLS[op])
 
     def __eq__(self, other):
+        if other is None:
+            return False
+        if not self.parts or not isinstance(self.parts[-1], str):
+            return self.dict() == other.dict()
         return self._ops('__eq__', other)
 
     def __ne__(self, other):
@@ -941,7 +946,7 @@ class Query(_BaseQuery):
         r['query'] = '\n'.join(lines)
         r['documents'] = swap_keys(r['documents'])
 
-        del r['_path']
+        del r['component']
         out = parser(**r, db=db)
         return out
 
@@ -1096,12 +1101,14 @@ def parse_query(
     query: t.Union[str, list],
     documents: t.Sequence[t.Any] = (),
     db: t.Optional['Datalayer'] = None,
+    _path: str = None,
 ):
     """Parse a string query into a query object.
 
     :param query: The query to parse.
     :param documents: The documents to query.
     :param db: The datalayer to use to execute the query.
+    :param _path: Internal use only.
     """
     if isinstance(query, str):
         query = [x.strip() for x in query.split('\n') if x.strip()]

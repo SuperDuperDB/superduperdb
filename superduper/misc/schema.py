@@ -8,7 +8,6 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any, ForwardRef, get_args, get_origin
 
-from superduper import logging
 from superduper.base.base import Base
 from superduper.components.component import Component
 from superduper.misc import typing as superduper_typing

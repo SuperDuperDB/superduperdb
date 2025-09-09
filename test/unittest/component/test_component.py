@@ -30,7 +30,7 @@ def cleanup():
 
 
 @dc.dataclass(kw_only=True)
-class MyComponent(Component):
+class MyComponentImpl(Component):
     type_id: t.ClassVar[str] = "my_type"
     _fields = {
         'my_dict': dill_serializer,
@@ -73,7 +73,7 @@ def test_init(db, monkeypatch):
         builder=dill_serializer._decode_data,
     )
 
-    c = MyComponent("test", my_dict=my_dict, a=a, nested_list=list_)
+    c = MyComponentImpl("test", my_dict=my_dict, a=a, nested_list=list_)
 
     c.setup()
 
@@ -226,13 +226,16 @@ class MyClass:
 
         return numpy.random.randn(20)
 
+    def __call__(self, x):
+        return self.predict(x)
+
 
 def test_calls_post_init():
     t = Table('test', fields={'x': 'str'})
     assert hasattr(t, 'version')
 
 
-def my_func(x):
+def my_func(x) -> int:
     return x + 1
 
 
@@ -284,8 +287,8 @@ def test_rehash(db):
         Listener(
             'test',
             model=m6,
-            select=db['documents'],
-            upstream=[Table('documents', fields={'x': 'str'})],
+            select=db['documents_rehash'],
+            upstream=[Table('documents_rehash', fields={'x': 'str'})],
             key='x',
         )
     )
@@ -298,14 +301,15 @@ def test_propagate_failure(db):
     m = ObjectModel(
         identifier='model',
         object=my_func,
+        datatype='int',
     )
 
     listener = Listener(
         model=m,
         key='x',
         identifier='test',
-        select=db['documents'],
-        upstream=[Table('documents', fields={'x': 'str'})],
+        select=db['documents_propagate'],
+        upstream=[Table('documents_propagate', fields={'x': 'str'})],
     )
 
     db.apply(listener, force=True)
@@ -324,7 +328,7 @@ def test_propagate_failure(db):
 
     job = Job(
         context='123',
-        component='ObjectModel',
+        parent_component='ObjectModel',
         identifier='model',
         uuid=m.uuid,
         args=(2,),
@@ -349,12 +353,20 @@ def test_propagate_failure(db):
     assert j['status'] == STATUS_FAILED
     assert j['details']['reason'] == 'Test exception'
 
-    assert db['ObjectModel'].get(uuid=m.uuid)['status'] == STATUS_FAILED
-    assert db['Listener'].get(uuid=listener.uuid)['status'] == STATUS_FAILED
+    assert (
+        db['Deployment'].get(component='ObjectModel', uuid=m.uuid)['status']
+        == STATUS_FAILED
+    )
+    assert (
+        db['Deployment'].get(component='Listener', uuid=listener.uuid)['status']
+        == STATUS_FAILED
+    )
 
     assert (
         f'Job/ObjectModel:model:{m.uuid}.predict'
-        in db['ObjectModel'].get(uuid=m.uuid)['details']['failed_children']
+        in db['Deployment'].get(component='ObjectModel', uuid=m.uuid)['details'][
+            'failed_children'
+        ]
     )
 
 
@@ -367,7 +379,7 @@ class TestComponentRef(Component):
 
 
 def test_component_reference(db):
-    my_component = MyComponent(
+    my_component = MyComponentImpl(
         identifier='my_component',
         my_dict={'key': 'value'},
         nested_list=[1, 2, 3],

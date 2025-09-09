@@ -12,7 +12,6 @@ from collections import OrderedDict, defaultdict
 from contextlib import contextmanager, redirect_stdout
 from functools import wraps
 
-import networkx
 import rich
 
 from superduper import logging
@@ -20,12 +19,12 @@ from superduper.base.annotations import trigger
 from superduper.base.base import Base, BaseMeta
 from superduper.base.constant import KEY_BLOBS, KEY_FILES, LENGTH_UUID
 from superduper.base.status import (
+    STATUS_DEPRECATED,
     STATUS_PENDING,
     STATUS_RUNNING,
     init_status,
 )
 from superduper.base.variables import _replace_variables
-from superduper.misc.annotations import lazy_classproperty
 from superduper.misc.importing import isreallyinstance
 from superduper.misc.utils import hash_item
 
@@ -58,7 +57,7 @@ def ensure_setup(func):
     @wraps(func)
     def wrapper(self, *args, **kwargs):
         if not getattr(self, "_is_setup", False):
-            model_message = f"{self.__class__.__name__} : {self.identifier}"
+            model_message = f"{self.component} : {self.identifier}"
             logging.debug(f"Initializing {model_message}")
             self.setup()
             self._is_setup = True
@@ -184,6 +183,7 @@ class Component(Base, metaclass=ComponentMeta):
 
 
     :param identifier: Identifier of the instance.
+    :param data: Data stored about the component.
     :param upstream: A list of upstream components.
     :param compute_kwargs: Keyword arguments to manage the compute environment.
 
@@ -194,31 +194,147 @@ class Component(Base, metaclass=ComponentMeta):
     breaks: t.ClassVar[t.Sequence] = ()
     triggers: t.ClassVar[t.List] = []
     services: t.ClassVar[t.List] = ()
+    tags: t.ClassVar[t.Sequence] = ()
+    filter_deployment: t.ClassVar[str | None] = None
     metadata_fields: t.ClassVar[t.Dict[str, t.Type]] = {
         'version': int,
-        'status': str,
-        'details': dict,
+        'uuid': str,
+        'branch': str,
+        'parent': str,
+        'component': str,
+        '_path': str,
+        'upstream_uuids': t.List[str],
     }
 
     identifier: str
+    data: t.Dict | None = None
     upstream: t.Optional[t.List['Component']] = None
     compute_kwargs: t.Dict = dc.field(default_factory=dict)
 
     db: dc.InitVar[t.Optional['Datalayer']] = None
 
     def __post_init__(self, db: t.Optional['Datalayer'] = None):
+
         self.db: Datalayer = db
 
         self.version: t.Optional[int] = None
-        self.status, self.details = init_status()
+        self.context: str | None = None
+        self.branch, self.parent = self.get_branch_and_parent()
 
         self._original_parameters: t.Dict | None = None
         self._use_component_cache: bool = True
 
+        self._uuid = None
+        self._hash = None
+        self._merkle_tree_breaks = None
+        self._merkle_tree = None
+        self._parents: t.List[t.Tuple[Component, str]] = []
+        self._children: t.List[Component] = []
+        self._metadata_children: t.List[Component] = []
+        self._upstream_uuids: t.Optional[t.List[str]] = None
+
         self._handle_variables()
         self.postinit()
+        self._handle_parent_children()
 
         assert self.identifier, "Identifier cannot be empty or None"
+
+    def _handle_parent_children(self):
+        for child, position in self._get_children_with_positions():
+            child_uuids = [p[0].uuid for p in child._parents]
+            if position in self.metadata_fields:
+                self._metadata_children.append(child)
+            else:
+                self._children.append(child)
+            if self.uuid not in child_uuids:
+                child._parents.append((self, position))
+
+    @property
+    def uuid(self):
+        """Get UUID."""
+        if self._uuid is None:
+            breaking = hash_item(
+                [self.component, self.identifier]
+                + [
+                    self.merkle_tree_breaks[k]
+                    for k in self.breaks
+                    if k in self.merkle_tree_breaks
+                ]
+            )
+            return breaking[:LENGTH_UUID]
+        return self._uuid
+
+    @property
+    def hash(self):
+        """Get hash."""
+        if self._hash is None:
+            t = self.merkle_tree
+            breaking_hashes = [t[k] for k in self.breaks if k in t]
+            non_breaking_hashes = [t[k] for k in t if k not in self.breaks]
+            breaking = hash_item(breaking_hashes)
+            non_breaking = hash_item(non_breaking_hashes)
+            self._hash = breaking[:32] + non_breaking[:32]
+        return self._hash
+
+    @property
+    def merkle_tree_breaks(self):
+        """Get merkle tree for breaking changes."""
+        if self._merkle_tree_breaks is None:
+            self._merkle_tree_breaks = self._get_merkle_tree(breaks=True)
+        return self._merkle_tree_breaks
+
+    @property
+    def merkle_tree(self):
+        """Get merkle tree."""
+        if self._merkle_tree is None:
+            self._merkle_tree = self._get_merkle_tree(breaks=False)
+        return self._merkle_tree
+
+    @property
+    def upstream_uuids(self):
+        """Get upstream component UUIDs."""
+        return [c.uuid for c in self.get_children(deep=True, metadata=False)]
+
+    @upstream_uuids.setter
+    def upstream_uuids(self, value: t.List[str]):
+        self._upstream_uuids = value
+
+    def _do_hash_item(self, key, value):
+        if key in self.parameters:
+            self.merkle_tree[key] = self._hash_item(key, value, breaks=False)
+        if key in self.breaks:
+            logging.user(f'Breaking change detected in {self.component}.{key}')
+            self.merkle_tree_breaks[key] = self._hash_item(key, value, breaks=True)
+
+    def __setattr__(self, key, value):
+        if key in self.metadata_fields or key not in self.class_fields:
+            return super().__setattr__(key, value)
+
+        # initialization phase
+        if '_merkle_tree' not in self.__dict__:
+            return super().__setattr__(key, value)
+
+        if getattr(self, key) == value:
+            return
+
+        _ = self.merkle_tree
+
+        if key not in self.merkle_tree:
+            return super().__setattr__(key, value)
+
+        super().__setattr__(key, value)
+
+        _ = self.merkle_tree_breaks
+
+        previous_uuid = self.uuid
+
+        self._do_hash_item(key, value)
+
+        if previous_uuid == self.uuid:
+            return
+
+        for parent, position in self._parents:
+            parent._do_hash_item(position, getattr(parent, position))
 
     def _build_tree(self, depth: int, tree=None):
         """Show the component."""
@@ -232,8 +348,10 @@ class Component(Base, metaclass=ComponentMeta):
         s = self.class_schema
 
         for k, v in self.dict(metadata=False).items():
-            if k in {'_path', 'uuid', 'identifier'}:
-                continue
+            if k in set(self.metadata_fields) - {'_path'}:
+                raise Exception(
+                    f"Metadata field {k} should not be shown in tree; did you set `metadata=False`?"
+                )
             if isinstance(v, Component):
                 subtree = tree.add(f"{k}: {v.huuid}")
                 v._build_tree(depth - 1, subtree)
@@ -274,45 +392,32 @@ class Component(Base, metaclass=ComponentMeta):
         assert self.db is not None, "Datalayer is not set"
         self.db.apply(self, jobs=False, force=True)
 
-    @property
-    def metadata(self):
-        """Get metadata of the component."""
-        return {k: getattr(self, k) for k in self.metadata_fields}
+    @uuid.setter
+    def uuid(self, value):
+        """Set UUID.
 
-    @property
-    def uuid(self):
-        """Get UUID."""
-        t = self.get_merkle_tree(breaks=True)
-        breaking = hash_item(
-            [self.component, self.identifier] + [t[k] for k in self.breaks if k in t]
-        )
-        return breaking[:LENGTH_UUID]
+        :param value: The UUID to set.
+        """
+        self._uuid = value
 
-    def get_merkle_tree(self, breaks: bool):
+    def _get_merkle_tree(self, breaks: bool):
         """Get the merkle tree of the component.
 
         :param breaks: If set `true` only regard the parameters which break a version.
         """
-        r = self._dict(metadata=False)
+        r = self.dict(metadata=False)
         s = self.class_schema
-        keys = sorted(
-            [
-                k
-                for k in r.keys()
-                if k in s.fields and k not in {'uuid', 'status', 'details'}
-            ]
-        )
-
-        def get_hash(x):
-            if breaks:
-                return s.fields[x].uuid(r[x])[:32]
-            else:
-                return s.fields[x].hash(r[x])
-
-        tree = OrderedDict(
-            [(k, get_hash(k) if r[k] is not None else hash_item(None)) for k in keys]
-        )
+        keys = sorted([k for k in r.keys() if k in s.fields])
+        tree = OrderedDict([(k, self._hash_item(k, r[k], breaks=breaks)) for k in keys])
         return tree
+
+    @classmethod
+    def _hash_item(cls, k: str, v: t.Any, breaks: bool = False):
+        if v is None:
+            return hash_item(None)
+        if breaks:
+            return cls.class_schema.fields[k].uuid(v)[:32]
+        return cls.class_schema.fields[k].hash(v)
 
     def diff(self, other: 'Component'):
         """Get the difference between two components.
@@ -325,8 +430,8 @@ class Component(Base, metaclass=ComponentMeta):
         if other.hash == self.hash:
             return {}
 
-        m1 = self.get_merkle_tree(breaks=True)
-        m2 = other.get_merkle_tree(breaks=True)
+        m1 = self._get_merkle_tree(breaks=True)
+        m2 = other._get_merkle_tree(breaks=True)
         d = []
         for k in m1:
             if m1[k] != m2[k]:
@@ -337,34 +442,15 @@ class Component(Base, metaclass=ComponentMeta):
     def component(self):
         return self.__class__.__name__
 
-    @staticmethod
-    def sort_components(components):
-        """Sort components based on topological order.
-
-        :param components: List of components.
-        """
-        logging.info('Resorting components based on topological order.')
-        G = networkx.DiGraph()
-        lookup = {c.huuid: c for c in components}
-        for k in lookup:
-            G.add_node(k)
-            for d in lookup[k].get_children_refs():  # dependencies:
-                if d in lookup:
-                    G.add_edge(d, k)
-
-        nodes = list(networkx.topological_sort(G))
-        logging.info(f'New order of components: {nodes}')
-        return [lookup[n] for n in nodes]
-
     @property
     def huuid(self):
         """Return a human-readable uuid."""
-        return f'{self.__class__.__name__}:{self.identifier}:{self.uuid}'
+        return f'{self.component}:{self.identifier}:{self.uuid}'
 
-    def get_children_refs(self, deep: bool = False, only_initializing: bool = False):
+    # TODO use self.children instead
+    def get_children_refs(self, only_initializing: bool = False):
         """Get all the children of the component.
 
-        :param deep: If set `true` get all the children of the component.
         :param only_initializing: If set `true` get only the initializing children.
         """
         r = self.dict()
@@ -383,7 +469,7 @@ class Component(Base, metaclass=ComponentMeta):
             from superduper.base.datatype import ComponentRef
 
             if isinstance(r, (Component, ComponentRef)):
-                if only_initializing and r.status.phase != STATUS_PENDING:
+                if only_initializing and r.status != STATUS_PENDING:
                     return []
                 else:
                     return [r.huuid]
@@ -392,34 +478,69 @@ class Component(Base, metaclass=ComponentMeta):
         out = _find_refs(r)
         return sorted(list(set(out)))
 
-    def get_children(self, deep: bool = False) -> t.List["Component"]:
+    def _get_children_with_positions(self):
+        from superduper.base.datatype import ComponentRef
+
+        r = self.dict(metadata=True)
+
+        out = defaultdict(list)
+
+        def _get_children_from_item(item, k):
+            if isinstance(item, (Component, ComponentRef)):
+                out[k].append(item)
+            elif isinstance(item, dict):
+                for v in item.values():
+                    _get_children_from_item(v, k)
+            elif isinstance(item, (tuple, list)):
+                for x in item:
+                    _get_children_from_item(x, k)
+
+        for k, v in r.items():
+            _get_children_from_item(v, k)
+
+        to_return = []
+
+        for k, v in out.items():
+            for x in v:
+                to_return.append((x, k))
+
+        return to_return
+
+    def get_children(self, deep: bool = False, metadata=True) -> t.List["Component"]:
         """Get all the children of the component.
 
         :param deep: If set `True` get all recursively.
+        :param metadata: Get component children also in the metadata.
         """
-        from superduper.base.datatype import ComponentRef, Saveable
+        if not deep:
+            if not metadata:
+                return self.children
+            else:
+                out = {}
+                for v in self.children + self.metadata_children:
+                    out[v.uuid] = v
+                return list(out.values())
 
-        r = self.dict().encode(leaves_to_keep=(Component, Saveable))
-        out = [
-            v.setup() or v
-            for v in r['_builds'].values()
-            if isinstance(v, (Component, ComponentRef))
-        ]
         lookup: t.Dict[int, "Component"] = {}
-        for v in out:
-            lookup[id(v)] = v
+        for v in self.children:
+            lookup[v.uuid] = v
         if deep:
             children = list(lookup.values())
             for v in children:
-                sub = v.get_children(deep=True)
+                sub = v.get_children(deep=True, metadata=metadata)
                 for s in sub:
-                    lookup[id(s)] = s
+                    lookup[s.uuid] = s
         return list(lookup.values())
 
     @property
     def children(self):
         """Get all the child components of the component."""
-        return self.get_children(deep=False)
+        return self._children
+
+    @property
+    def metadata_children(self):
+        """Get all the child components of the component."""
+        return self._metadata_children
 
     def _filter_trigger(self, name, event_type):
         attr = getattr(self, name)
@@ -465,14 +586,14 @@ class Component(Base, metaclass=ComponentMeta):
         )
 
     @classmethod
-    def branch(cls):
+    def get_branch_and_parent(cls):
         mro = cls.__mro__
         try:
             i = mro.index(Component)
         except ValueError:
             raise TypeError(f"{cls.__name__} is not a subclass of Component")
         # If cls is Component itself, there is no class 'down' from Component
-        return None if i == 0 else mro[i - 1]
+        return (None, None) if i == 0 else (mro[i - 1].__name__, mro[0].__name__)
 
     @trigger('apply')
     def set_status(self):
@@ -481,7 +602,7 @@ class Component(Base, metaclass=ComponentMeta):
         :param status: The status to set the component to.
         """
         return self.db.metadata.set_component_status(
-            self.__class__.__name__,
+            self.component,
             self.uuid,
             status=STATUS_RUNNING,
             reason='The component is ready to use',
@@ -546,8 +667,7 @@ class Component(Base, metaclass=ComponentMeta):
                         )
                     except KeyError as e:
                         r = self.db.metadata.get_component_by_uuid(uuid=child_uuid)
-                        class_name = r['_path'].split('.')[-1]
-                        huuid = f'{class_name}:{r["identifier"]}:{r["uuid"]}'
+                        huuid = f'{r["component"]}:{r["identifier"]}:{r["uuid"]}'
                         if event_type == 'apply':
                             if r['status'] == STATUS_PENDING:
                                 raise Exception(
@@ -598,7 +718,7 @@ class Component(Base, metaclass=ComponentMeta):
             status_update: 'Job' = self.set_status(job=True, context=context)
             children_set = {(c.component, c.uuid) for c in self.get_children()}
             children_jobs = [
-                job for job in jobs if (job.component, job.uuid) in children_set
+                job for job in jobs if (job.parent_component, job.uuid) in children_set
             ]
             status_update.dependencies = [j.job_id for j in local_jobs + children_jobs]
             local_jobs.append(status_update)
@@ -634,7 +754,7 @@ class Component(Base, metaclass=ComponentMeta):
         leaf_keys = [k for k in r.keys(True) if isinstance(r[k], Base)]
         return {k: r[k] for k in leaf_keys}
 
-    def _refresh(self, uuid_swaps: t.Optional[dict[str, str]] = None, **variables):
+    def _refresh(self, uuid_swaps: t.Optional[t.Dict[str, str]] = None, **variables):
         def do_refresh(item):
             if isinstance(item, str):
                 if '<var:' in item:
@@ -702,9 +822,6 @@ class Component(Base, metaclass=ComponentMeta):
             context_swap_value[former_uuid] = self.uuid
 
         context_swap.set(context_swap_value)
-
-    def postinit(self):
-        """Post initialization method."""
 
     def cleanup(self):
         """Method to clean the component."""
@@ -805,6 +922,7 @@ class Component(Base, metaclass=ComponentMeta):
             )
         if variables:
             config_object['variables'].update(variables)
+
         return Component.decode(config_object)
 
     def export(
@@ -906,27 +1024,14 @@ class Component(Base, metaclass=ComponentMeta):
             else:
                 shutil.copy(file_path, save_path)
 
-    def _dict(self, metadata: bool = True):
-        return super().dict(metadata=metadata)
-
-    def dict(self, metadata: bool = True):
-        """Get the dictionary representation of the component.
-
-        :param metadata: If set `True` include metadata in the dictionary.
-        """
-        r = self._dict(metadata=metadata)
-        r['uuid'] = self.uuid
-        r['_path'] = self.__module__ + '.' + self.__class__.__name__
-        return r
-
     @property
-    def hash(self):
-        t = self.get_merkle_tree(breaks=False)
-        breaking_hashes = [t[k] for k in self.breaks if k in t]
-        non_breaking_hashes = [t[k] for k in t if k not in self.breaks]
-        breaking = hash_item(breaking_hashes)
-        non_breaking = hash_item(non_breaking_hashes)
-        return breaking[:32] + non_breaking[:32]
+    def status(self):
+        r = self.db['Deployment'].get(
+            component=self.component, identifier=self.identifier
+        )
+        if r['uuid'] != self.uuid:
+            return STATUS_DEPRECATED
+        return r['status']
 
     def use_variables(self, **variables) -> 'Component':
         """Use variables in the component.

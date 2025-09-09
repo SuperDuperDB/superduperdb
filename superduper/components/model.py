@@ -16,7 +16,6 @@ import requests
 from superduper import logging
 from superduper.base.annotations import trigger
 from superduper.base.query import Query
-from superduper.base.schema import Schema
 from superduper.components.component import Component, ComponentMeta, ensure_setup
 from superduper.components.metric import Metric
 from superduper.misc import typing as st
@@ -338,8 +337,8 @@ class Model(Component, metaclass=ModelMeta):
         if isinstance(key, str):
             # metrics are currently functions of 2 inputs.
             key = [key, key]
-        inputs = self._map_inputs(self.signature, dataset.data, key[0])
-        targets = self._map_inputs('singleton', dataset.data, key[1])
+        inputs = self._map_inputs(self.signature, dataset.dataset, key[0])
+        targets = self._map_inputs('singleton', dataset.dataset, key[1])
         predictions = self.predict_batches(inputs)
         results = {}
         for m in metrics:
@@ -353,6 +352,7 @@ class Model(Component, metaclass=ModelMeta):
         :param db: DataLayer instance.
         """
         assert isinstance(self.validation, Validation)
+        metric_values = self.metric_values or {}
         for dataset in self.validation.datasets:
             logging.info(f'Validating on {dataset.identifier}...')
             results = self.validate(
@@ -360,9 +360,8 @@ class Model(Component, metaclass=ModelMeta):
                 dataset=dataset,
                 metrics=self.validation.metrics,
             )
-            self.metric_values[f'{dataset.identifier}/{dataset.version}'] = results
-
-        # TODO create self.save()
+            metric_values[f'{dataset.identifier}/{dataset.version}'] = results
+        self.metric_values = metric_values
         self.db.apply(self, jobs=False)
 
     def _create_datasets(self, X, db, select):
@@ -450,6 +449,7 @@ class Model(Component, metaclass=ModelMeta):
             X=self.trainer.key,
             db=self.db,
         )
+
         if len(train_dataset) == 0:
             logging.warn('No data found for training, skipping training')
             return
@@ -491,26 +491,32 @@ class ObjectModel(Model):
     >>> m.predict(2)
     4
 
-    :param num_workers: Number of workers to use for parallel processing
     :param object: Model/ computation object
     :param method: Method to call on the object
 
     """
 
     breaks: t.ClassVar[t.Sequence] = ('object', 'trainer')
+
     object: t.Callable
     method: t.Optional[str] = None
 
-    # TODO use postinit?
-    def __post_init__(self, db):
-        super().__post_init__(db)
+    def postinit(self):
+        """Post-initialization method."""
         self._inferred_signature = None
+        if self.datatype is None:
+            self.datatype = Annotation.build(self.signature).datatype
 
     @property
     @ensure_setup
     def signature(self):
         if self._inferred_signature is None:
-            self._inferred_signature = self._infer_signature(self.object)
+            if self.method is None:
+                self._inferred_signature = self._infer_signature(self.object)
+            else:
+                self._inferred_signature = self._infer_signature(
+                    getattr(self.object, self.method)
+                )
         return self._inferred_signature
 
     # TODO this looks like legacy code.
