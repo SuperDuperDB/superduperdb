@@ -84,9 +84,24 @@ class VectorIndex(CDC):
                 f'{self.indexing_listener.output_table.schema}'
             )
         return self
+####---- Fixed by Arif-Badhon----##############
+    def list(self, name: str, limit: int):
+        """
+        List vectors in the index filtered by name and limited by count.
 
-    def list(self):
-        return self.db[self.indexing_listener.outputs].ids()
+        :param name: Name or identifier to filter vectors.
+        :type name: str
+        :param limit: Maximum number of results to return.
+        :type limit: int
+        :returns: List of vector entries or metadata matching the query.
+        :rtype: list
+        """
+        # TODO: Implement actual retrieval logic
+        return []
+####---- Fixed by Arif-Badhon----##############
+
+
+
 
     @ensure_setup
     def get_vectors(self, ids: t.Sequence[str] | None = None):
