@@ -18,7 +18,7 @@ keywords = [
     "ai",
 ]
 requires-python = ">=3.10"
-dynamic = ["version"]
+version = "0.7.0"
 dependencies = [
     "numpy",
     "openai>=1.1.2",
@@ -38,8 +38,6 @@ source = "https://github.com/superduper-io/superduper"
 [tool.setuptools.packages.find]
 include = ["superduper_openai*"]
 
-[tool.setuptools.dynamic]
-version = {attr = "superduper_openai.__version__"}
 
 [tool.black]
 skip-string-normalization = true

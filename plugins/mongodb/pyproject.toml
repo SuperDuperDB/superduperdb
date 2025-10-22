@@ -26,7 +26,7 @@ keywords = [
     "ai",
 ]
 requires-python = ">=3.10"
-dynamic = ["version"]
+version = "0.9.1"
 dependencies = [
     "mongomock",
     "pymongo",
@@ -41,8 +41,6 @@ source = "https://github.com/superduper-io/superduper"
 [tool.setuptools.packages.find]
 include = ["superduper_mongodb*"]
 
-[tool.setuptools.dynamic]
-version = {attr = "superduper_mongodb.__version__"}
 
 [tool.black]
 skip-string-normalization = true
