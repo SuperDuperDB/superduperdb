@@ -95,7 +95,7 @@ class SnowflakeVectorSearcher(BaseVectorSearcher):
         :param items: t.Sequence of VectorItems
         """
         # NOTE: Since we will be doing vector search on tables directly
-        # seperate vector search is not required.
+        # separate vector search is not required.
 
     def delete(self, ids: t.Sequence[str]) -> None:
         """Remove items from the index.

@@ -187,7 +187,7 @@ def test_model_append_metrics():
 
 
 def test_model_validate():
-    # Check the metadadata recieves the correct values
+    # Check the metadadata receives the correct values
     model = Validator('test', object=lambda x: x)
     model._signature = 'singleton'
     my_metric = MagicMock(spec=Metric)
