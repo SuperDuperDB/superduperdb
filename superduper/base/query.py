@@ -8,6 +8,7 @@ Select always comes last, unless with `.get`, `.limit`.
 
 """
 
+import ast
 import dataclasses as dc
 import functools
 import json
@@ -276,7 +277,7 @@ def bind(f):
         out = f(self, *args, **kwargs)
         children = self.mapping[f.__name__]
         for method in children:
-            out._bind_base_method(method, eval(method))
+            out._bind_base_method(method, getattr(self.__class__, method))
         return out
 
     decorated.__name__ = f.__name__
@@ -624,7 +625,7 @@ class Query(_BaseQuery):
 
         if not self.parts:
             for method in self.mapping:
-                self._bind_base_method(method, eval(method))
+                self._bind_base_method(method, getattr(self.__class__, method))
         elif self.parts:
             if isinstance(self.parts[-1], str):
                 name = self.parts[-1]
@@ -634,7 +635,7 @@ class Query(_BaseQuery):
 
                 try:
                     for method in self.mapping[name]:
-                        self._bind_base_method(method, eval(method))
+                        self._bind_base_method(method, getattr(self.__class__, method))
                 except KeyError:
                     pass
 
@@ -899,7 +900,7 @@ class Query(_BaseQuery):
             output_query_groups = re.findall('\.outputs\((.*?)\)', line)
 
             for group in output_query_groups:
-                predict_ids = [eval(x.strip()) for x in group.split(',')]
+                predict_ids = [ast.literal_eval(x.strip()) for x in group.split(',')]
                 replace_ids = []
                 for predict_id in predict_ids:
                     if re.match(r'^.*__([0-9a-z]{8,})$', predict_id):
@@ -989,8 +990,35 @@ class Query(_BaseQuery):
         return results
 
 
+def _safe_resolve(expr, documents=(), query=None):
+    """Safely resolve a single expression without using eval().
+
+    Handles references like ``documents[n]``, ``documents[n:m]``, and
+    ``query[N]``, then falls back to ``ast.literal_eval`` for literal values.
+
+    :param expr: The expression string to resolve.
+    :param documents: Sequence of documents to index into.
+    :param query: Optional sequence or dict of sub-queries to index into.
+    """
+    # Resolve documents[n] references
+    if m := re.fullmatch(r'documents\[(\d+)\]', expr):
+        return documents[int(m.group(1))]
+    # Resolve documents[n:m] slice references
+    if m := re.fullmatch(r'documents\[(\d+):(\d+)\]', expr):
+        return documents[int(m.group(1)) : int(m.group(2))]
+    # Resolve query[N] references (N is numeric after _dump_query substitution)
+    if m := re.fullmatch(r'query\[(\d+)\]', expr):
+        if query is not None:
+            if isinstance(query, (list, tuple)):
+                return query[int(m.group(1))]
+            return query[m.group(1)]
+        raise ValueError(f'query[...] reference found but no query provided: {expr}')
+    # Fall back to safe literal evaluation
+    return ast.literal_eval(expr)
+
+
 def _parse_op_part(table, col, symbol, operand, db, documents=()):
-    operand = eval(operand, {'documents': documents})
+    operand = _safe_resolve(operand, documents=documents)
 
     reverse = dict(zip(SYMBOLS.values(), SYMBOLS.keys()))
 
@@ -1071,9 +1099,9 @@ def _parse_query_part(part, documents, query, db):
         for x in args_kwargs:
             if '=' in x:
                 k, v = x.split('=')
-                kwargs[k] = eval(v, {'documents': documents, 'query': query})
+                kwargs[k] = _safe_resolve(v, documents=documents, query=query)
             else:
-                args.append(eval(x, {'documents': documents, 'query': query}))
+                args.append(_safe_resolve(x, documents=documents, query=query))
         current = comp(*args, **kwargs)
 
     return current
