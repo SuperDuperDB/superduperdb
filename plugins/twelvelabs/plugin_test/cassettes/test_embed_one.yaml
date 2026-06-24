@@ -1,0 +1,102 @@
+interactions:
+- request:
+    body: "--022427aac1ec4281cf07f0e57ba6e9c5\r\nContent-Disposition: form-data; name=\"model_name\"\r\n\r\nmarengo3.0\r\n--022427aac1ec4281cf07f0e57ba6e9c5\r\nContent-Disposition:
+      form-data; name=\"text\"\r\n\r\na cat playing piano\r\n--022427aac1ec4281cf07f0e57ba6e9c5--\r\n"
+    headers:
+      accept:
+      - '*/*'
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '243'
+      content-type:
+      - multipart/form-data; boundary=022427aac1ec4281cf07f0e57ba6e9c5
+      host:
+      - api.twelvelabs.io
+      user-agent:
+      - twelvelabs/1.2.8
+      x-fern-language:
+      - Python
+      x-fern-sdk-name:
+      - twelvelabs
+      x-fern-sdk-version:
+      - 1.2.8
+    method: POST
+    uri: https://api.twelvelabs.io/v1.3/embed
+  response:
+    body:
+      string: !!binary |
+        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
+        //8m5SP35xgAAA==
+    headers:
+      connection:
+      - keep-alive
+      content-encoding:
+      - gzip
+      content-type:
+      - application/json
+      date:
+      - Wed, 24 Jun 2026 04:42:07 GMT
+      tl-report:
+      - backend
+      transfer-encoding:
+      - chunked
+      vary:
+      - Accept-Encoding
+      x-ratelimit-dimensions:
+      - Duration,Request
+      x-ratelimit-duration-limit:
+      - '144000'
+      x-ratelimit-duration-remaining:
+      - '143999'
+      x-ratelimit-duration-reset:
+      - '1782277433'
+      x-ratelimit-request-limit:
+      - '2400'
+      x-ratelimit-request-remaining:
+      - '2399'
+      x-ratelimit-request-reset:
+      - '1782276187'
+      x-trace-id:
+      - b685bb62d0873429aaadf733161d62fd
+    status:
+      code: 200
+      message: OK
+version: 1
