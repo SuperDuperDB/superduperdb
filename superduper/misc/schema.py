@@ -75,6 +75,8 @@ class Annotation(ABC):
         bt = self.base_types
         if 'dill' in bt:
             return 'dill'
+        if 'auto' in bt:
+            return 'auto'
         if 'file' in bt:
             allowed = {
                 'Path': 'file',
@@ -321,6 +323,20 @@ class Dill(Annotation):
         return 'dill'
 
 
+class Auto(Annotation):
+    """Annotation for the text-preferring Auto datatype (JSON with dill fallback)."""
+
+    @property
+    def base_types(self) -> t.Set[str]:
+        """Return the base types of the annotation."""
+        return {'auto'}
+
+    @property
+    def datatype(self) -> str:
+        """Return the datatype of the annotation."""
+        return 'auto'
+
+
 class JSON(Annotation):
     """Annotation for JSON types."""
 
@@ -363,7 +379,7 @@ def default_factory(key):
             pass
         else:
             raise e
-    return Dill
+    return Auto
 
 
 ANNOTATIONS = ArgumentDefaultDict(
@@ -388,6 +404,9 @@ ANNOTATIONS = ArgumentDefaultDict(
         superduper_typing.SList: lambda: List[ComponentAnnotation],
         superduper_typing.BaseType: BaseAnnotation,
         superduper_typing.ComponentType: ComponentAnnotation,
+        superduper_typing.Dill: Dill,
+        superduper_typing.Pickle: Dill,
+        superduper_typing.PickleEncoder: Dill,
     },
 )
 
