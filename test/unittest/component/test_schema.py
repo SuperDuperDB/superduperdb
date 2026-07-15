@@ -116,7 +116,8 @@ def test_schema_with_file(db, tmp_file):
 
 
 def test_component_serializes_with_schema(db, tmp_file):
-    c = TestComponent('test', a='testing testing 123', b=tmp_file)
+    # `a` is a `Callable` field: a real callable takes the binary (blob) path.
+    c = TestComponent('test', a=lambda x: x, b=tmp_file)
 
     r = c.dict()
 

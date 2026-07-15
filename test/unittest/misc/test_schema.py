@@ -70,7 +70,7 @@ def test_base_types():
         | t.Tuple[t.List[str], t.Dict[str, MyClass]]
     )
 
-    assert a.base_types == {'str', 'int', 'dill'}
+    assert a.base_types == {'str', 'int', 'auto'}
 
 
 def test_type_mapping():
@@ -92,7 +92,7 @@ def test_type_mapping():
         | t.Tuple[t.List[str], t.Dict[str, MyClass]]
     )
 
-    assert a.datatype == 'dill'
+    assert a.datatype == 'auto'
 
     a = Annotation.build(
         str | t.Dict[str, str] | t.List[int] | t.Tuple[t.List[str], t.Dict[str, Model]]
@@ -122,5 +122,5 @@ def test_model_schema():
 
     assert str(s['a']) == 'str'
     assert str(s['b']) == 'JSON'
-    assert str(s['c']) == 'Dill'
+    assert str(s['c']) == 'Auto'
     assert str(s['d']) == 'ComponentType'

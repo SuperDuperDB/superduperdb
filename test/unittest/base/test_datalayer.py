@@ -119,8 +119,10 @@ def test_add_version(db: Datalayer):
 
 
 def test_add_artifact_auto_replace(db):
-    # Check artifact is automatically replaced to metadata
-    artifact = {'data': 1}
+    # Check artifact is automatically replaced to metadata.
+    # A non-JSON value is used so it takes the binary (blob) path; JSON-able
+    # values are now stored inline as text rather than as a blob artifact.
+    artifact = numpy.array([1, 2, 3])
     component = TestComponent(identifier='test', artifact=artifact)
     db.apply(component)
     r = db.show('TestComponent', 'test', -1)

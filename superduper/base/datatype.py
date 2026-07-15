@@ -647,6 +647,45 @@ class DillEncoder(_Encodable, _DillMixin, BaseDataType):
     """Encoder with dill."""
 
 
+class Auto(BaseDataType):
+    """Text-preferring serializer with a dill fallback."""
+
+    dtype: t.ClassVar[str] = 'json'
+
+    def encode_data(self, item, context):
+        """Encode `item`, preferring text (JSON) and falling back to dill.
+
+        :param item: The object/instance to encode.
+        :param context: A context object containing caches.
+        """
+        try:
+            if json.loads(json.dumps(item)) == item:
+                return item
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            pass
+        return Dill().encode_data(item, context)
+
+    def decode_data(self, item, builds, db):
+        """Decode `item`, handling both the text and the dill-fallback paths.
+
+        :param item: The item to decode.
+        :param builds: The build cache.
+        :param db: The Datalayer.
+        """
+        if isinstance(item, Blob):
+            return Dill().decode_data(item, builds, db)
+        if isinstance(item, str) and item.startswith('&:blob:'):
+            return Dill().decode_data(item, builds, db)
+        return item
+
+    @classmethod
+    def hash(cls, item):
+        # Mirror `_Artifact.hash`
+        if isinstance(item, Blob):
+            return item.identifier
+        return hash_indescript(item)
+
+
 class File(BaseDataType):
     """Type for encoding files on disk."""
 
@@ -745,6 +784,7 @@ class _DatatypeLookup:
         str(x).lower(): x
         for x in [
             JSON(),
+            Auto(),
             PickleEncoder(),
             DillEncoder(),
             Dill(),
@@ -977,6 +1017,7 @@ INBUILT_DATATYPES = _DatatypeLookup()
 dill_serializer = Dill()
 pickle_serializer = Pickle()
 pickle_encoder = PickleEncoder()
+auto_serializer = Auto()
 file = File()
 
 DEFAULT_SERIALIZER = dill_serializer
